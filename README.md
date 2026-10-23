@@ -1,4 +1,4 @@
-# Basis
+# Linear
 
 A linear algebra playground that starts from "what is a vector" and ends at SVD. Fifteen lenses in five topics, each with a plain-language story, things to try and a small glossary, on one shared canvas you can pan, zoom and draw on.
 
@@ -21,7 +21,11 @@ The lenses follow 3Blue1Brown's *Essence of linear algebra*, chapter by chapter,
 | 14 Eigenvectors and eigenvalues | Eigenvectors |
 | 15 A quick trick for eigenvalues | Eigenvectors (readouts m, p, m² − p) |
 | 16 Abstract vector spaces | Functions as vectors |
-| extras | Projection and least squares, Iterate, LU, QR, SVD |
+| 4 (entry by entry) | Multiplying matrices |
+| 14 in 3D | Eigenvectors in 3D |
+| extras | Projection and least squares, Iterate, LU, QR, SVD, Data and principal components, Compressing an image, Complex numbers as matrices, The Fourier basis, Four dimensions |
+
+Also: challenges on most lenses (a target to hit, checked live), PNG and video export of the scene, a bottom-sheet layout on phones, share links that encode the whole scene.
 
 ## Run
 
@@ -36,6 +40,11 @@ The lenses follow 3Blue1Brown's *Essence of linear algebra*, chapter by chapter,
 
 - `src/math/mat2.ts`  pure 2x2 maths: compose, interpolate, eigen, SVD
 - `src/math/mat3.ts`  3x3 maths: determinant, cross product, rank
+- `src/math/eig3.ts`  real eigenpairs of a 3x3 via the cubic
+- `src/math/svdn.ts`  Jacobi SVD for images, rank-k reconstruction
+- `src/math/pca.ts`   covariance and principal components
+- `src/math/hyper.ts` 4D rotations and the tesseract
+- `src/state/challenges.ts` per-lens challenges and their checks
 - `src/scene/painter3.ts` orthographic 3D camera on top of the 2D painter (orbit by dragging)
 - `src/state/store.ts` zustand store: matrix stack, scene objects, lens, time, share links
 - `src/state/lenses.ts` lens registry: titles, hints, stage counts, which handles are draggable

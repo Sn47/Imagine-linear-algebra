@@ -4,7 +4,7 @@ import { LENSES } from '../state/lenses'
 import { Painter, readColors, type Colors, type Geom } from './painter'
 import { draw, matrixAt, product } from './lenses'
 import { Painter3, type Camera } from './painter3'
-import { type Vec3 } from '../math/mat3'
+import { col3, withCol, type Vec3 } from '../math/mat3'
 import { col1, col2, fmt, type Vec } from '../math/mat2'
 
 const HALF = 5.2 // units from centre on the short side at zoom 1
@@ -29,6 +29,7 @@ export default function Scene() {
   const pinch = useRef<{ dist: number; zoom0: number; mid: Vec } | null>(null)
   const [cursor, setCursor] = useState<Vec | null>(null)
   const [zoomLabel, setZoomLabel] = useState(1)
+  const hover = useRef<Vec | null>(null)
 
   const state = useStore()
   const { drawing, t } = state
@@ -69,6 +70,13 @@ export default function Scene() {
     if (!colorsRef.current) colorsRef.current = readColors()
     const mono = getComputedStyle(document.body).getPropertyValue('--mono')
     draw(new Painter(ctx, geom.current, colorsRef.current, mono), state, t, cam.current)
+    // halo on the handle under the cursor, so draggable things announce themselves
+    const h = hover.current
+    if (h) {
+      const { cx, cy, unit } = geom.current
+      ctx.beginPath(); ctx.arc(cx + h.x * unit, cy - h.y * unit, 9, 0, Math.PI * 2)
+      ctx.strokeStyle = colorsRef.current.text; ctx.globalAlpha = 0.35; ctx.lineWidth = 1.5; ctx.stroke(); ctx.globalAlpha = 1
+    }
   })
 
   // Size, theme, wheel.
@@ -110,6 +118,21 @@ export default function Scene() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // 4D auto-rotation
+  const spin4 = useStore((st) => st.spin4)
+  useEffect(() => {
+    if (!spin4) return
+    let id = 0
+    const tick = () => {
+      const st = useStore.getState()
+      st.setAngle4(2, st.angles4[2] + 0.006)
+      st.setAngle4(3, st.angles4[3] + 0.004)
+      id = requestAnimationFrame(tick)
+    }
+    id = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(id)
+  }, [spin4])
+
   // Keyboard: arrows pan, + / - zoom, 0 resets.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -140,9 +163,11 @@ export default function Scene() {
       if (kinds.includes('columns')) { const A = product(s); hs.push({ id: 'e1', p: col1(A) }, { id: 'e2', p: col2(A) }) }
     }
     if (s.lens === 'spaces') { const [a, b, c, d] = s.poly; const x = s.probe.x; hs.push({ id: 'fx', p: { x, y: a + b * x + c * x * x + d * x * x * x } }); return hs }
+    if (kinds.includes('cols3')) { const q = painter3(); ([0, 1, 2] as const).forEach((c) => hs.push({ id: `c3:${c}`, p: q.flat(col3(s.m3, c)) })) }
+    if (s.lens === 'pca') { s.points.forEach((pt, i) => hs.push({ id: `pt:${i}`, p: pt })); return hs }
     if (kinds.includes('u3')) hs.push({ id: 'u3', p: painter3().flat(s.u3) })
     if (kinds.includes('v3')) hs.push({ id: 'v3', p: painter3().flat(s.v3) })
-    if (s.lens === 'transform3' || s.lens === 'nonsquare') return hs
+    if (LENSES[s.lens].is3d) return hs
     if (kinds.includes('probe')) hs.push({ id: 'probe', p: s.probe })
     if (kinds.includes('probe2')) hs.push({ id: 'probe2', p: s.lens === 'add' && s.options.k !== 1 ? s.probe2 : s.probe2 })
     for (const o of s.objects) {
@@ -178,6 +203,7 @@ export default function Scene() {
     if (s.drawing) { s.addDrawingPoint(snap(toWorld(ev), ev.shiftKey)); return }
     if (ev.altKey && !is3d()) { s.addVector(snap(toWorld(ev), ev.shiftKey)); return }
     const h = ev.button === 1 ? null : hit(ev)
+    if (!h && s.lens === 'pca' && ev.button === 0) { s.addPoint(snap(toWorld(ev), ev.shiftKey)); return }
     if (h) {
       if ((h.id === 'e1' || h.id === 'e2') && LENSES[s.lens].handles.includes('basis')) s.setT(s.tMax())
       drag.current = { id: h.id }
@@ -213,7 +239,14 @@ export default function Scene() {
     }
 
     const d = drag.current
-    if (!d) { el.classList.toggle('grab', !s.drawing && !!hit(ev)); return }
+    if (!d) {
+      const h = s.drawing ? null : hit(ev)
+      el.classList.toggle('grab', !!h)
+      const prev = hover.current
+      hover.current = h ? h.p : null
+      if (!!prev !== !!h || (h && prev && (prev.x !== h.p.x || prev.y !== h.p.y))) useStore.setState({})
+      return
+    }
     if ('orbit' in d) {
       cam.current = { yaw: d.cam0.yaw + (ev.clientX - d.start.x) * 0.008, pitch: Math.max(-1.5, Math.min(1.5, d.cam0.pitch + (ev.clientY - d.start.y) * 0.008)) }
       useStore.setState({})
@@ -226,6 +259,15 @@ export default function Scene() {
       return
     }
     const w = snap(toWorld(ev), ev.shiftKey)
+    if (d.id.startsWith('c3:')) {
+      const q = painter3()
+      const c = +d.id.slice(3) as 0 | 1 | 2
+      const cur = col3(s.m3, c)
+      const nv: Vec3 = q.unview({ x: w.x, y: w.y, z: q.view(cur).z })
+      s.setM3All(withCol(s.m3, c, nv))
+      return
+    }
+    if (d.id.startsWith('pt:')) { s.setPoint(+d.id.slice(3), w); return }
     if (d.id === 'u3' || d.id === 'v3') {
       // move in the screen plane, keep the depth component
       const q = painter3()
@@ -255,9 +297,10 @@ export default function Scene() {
   return (
     <div className={`viewport${drawing ? ' drawing' : ''}`} ref={wrapRef}>
       <canvas
+        id="scene-canvas"
         ref={canvasRef}
         onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
-        onPointerLeave={() => setCursor(null)} onDoubleClick={onDouble} onContextMenu={(e) => e.preventDefault()}
+        onPointerLeave={() => { setCursor(null); hover.current = null; useStore.setState({}) }} onDoubleClick={onDouble} onContextMenu={(e) => e.preventDefault()}
       />
       {cursor && !is3d() && <div className="coords">{fmt(cursor.x)}, {fmt(cursor.y)}</div>}
       <div className="view-tools">

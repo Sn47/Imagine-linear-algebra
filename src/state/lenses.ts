@@ -5,6 +5,7 @@ export type Lens =
   | 'transform3' | 'nonsquare' | 'cross'
   | 'eigen' | 'iterate'
   | 'lu' | 'qr' | 'svd'
+  | 'multiply' | 'eigen3' | 'pca' | 'compress' | 'complex' | 'fourier' | 'hyper'
   | 'spaces'
 
 export type Group = { name: string; lenses: Lens[] }
@@ -21,7 +22,7 @@ export type LensMeta = {
   /** Short definitions of the words this lens uses. */
   terms: { term: string; meaning: string }[]
   tMax: (ctx: { stackLength: number; steps: number }) => number
-  handles: ('basis' | 'columns' | 'probe' | 'probe2' | 'u3' | 'v3')[]
+  handles: ('basis' | 'columns' | 'probe' | 'probe2' | 'u3' | 'v3' | 'cols3')[]
   needsCircle?: boolean
   /** Chapter of 3Blue1Brown's Essence of linear algebra this lens follows. */
   chapter?: number
@@ -30,12 +31,13 @@ export type LensMeta = {
 
 export const GROUPS: Group[] = [
   { name: 'Vectors', lenses: ['vector', 'add', 'dot', 'duality'] },
-  { name: 'Matrices', lenses: ['matvec', 'transform', 'determinant', 'inverse'] },
+  { name: 'Matrices', lenses: ['matvec', 'transform', 'multiply', 'determinant', 'inverse'] },
   { name: 'Structure', lenses: ['span', 'subspaces', 'basis', 'project', 'cramer'] },
-  { name: '3D', lenses: ['transform3', 'nonsquare', 'cross'] },
+  { name: '3D', lenses: ['transform3', 'nonsquare', 'cross', 'eigen3'] },
   { name: 'Eigen', lenses: ['eigen', 'iterate'] },
   { name: 'Factorisations', lenses: ['lu', 'qr', 'svd'] },
-  { name: 'Beyond', lenses: ['spaces'] },
+  { name: 'Data', lenses: ['pca', 'compress'] },
+  { name: 'Beyond', lenses: ['spaces', 'complex', 'fourier', 'hyper'] },
 ]
 
 export const LENS_ORDER: Lens[] = GROUPS.flatMap((g) => g.lenses)
@@ -410,7 +412,7 @@ export const LENSES: Record<Lens, LensMeta> = {
     story: [
       'In three dimensions a matrix has three columns, one for each basis vector. Everything else follows the same rule: a vector is a mix of î, ĵ and k̂, so its image is the same mix of the three columns.',
       'The cube shows what happens to volume: the determinant is now a volume scale factor, negative if the space has been turned inside out, zero if it was flattened onto a plane or a line.',
-      'Drag the background to orbit the camera. Linear transformations in 3D are what computer graphics and robotics use for every rotation and stretch.',
+      'Drag the background to orbit the camera, and drag the tips of î, ĵ and k̂ to reshape the box directly. Linear transformations in 3D are what computer graphics and robotics use for every rotation and stretch.',
     ],
     tryThis: [
       'Set the matrix to the identity and orbit around the cube.',
@@ -422,7 +424,7 @@ export const LENSES: Record<Lens, LensMeta> = {
       { term: 'volume', meaning: 'the 3D determinant scales volumes' },
       { term: 'rank', meaning: 'the dimension of the output: 3, a plane, a line, or a point' },
     ],
-    tMax: () => 1, handles: [], is3d: true,
+    tMax: () => 1, handles: ['cols3'], is3d: true,
   },
   nonsquare: {
     id: 'nonsquare', chapter: 8, title: 'Nonsquare matrices',
@@ -482,6 +484,144 @@ export const LENSES: Record<Lens, LensMeta> = {
       { term: 'basis functions', meaning: '1, x, x², x³ here; every cubic is a combination of them' },
     ],
     tMax: () => 1, handles: ['probe'],
+  },
+  multiply: {
+    id: 'multiply', chapter: 4, title: 'Multiplying matrices',
+    hint: 'Each entry of BA is a row of B dotted with a column of A. Watch the grid move while the cells fill in.',
+    story: [
+      'Applying A then B is itself a linear transformation, so it has a matrix. To find it, ask where î lands after both: take the first column of A and push it through B. That is the first column of the product. Same for ĵ.',
+      'Entry by entry, the number in row i, column j of the product is row i of B dotted with column j of A. The panel highlights the row and column that make the current cell while the canvas shows the same column of A being carried by B.',
+      'This is why the product is written BA when A acts first: read right to left, like function composition. And it is why AB and BA usually differ.',
+    ],
+    tryThis: [
+      'Scrub slowly: four cells, four row-times-column sums.',
+      'Swap A and B with the arrows and compare the two products.',
+      'Make B the identity. The product is just A.',
+    ],
+    terms: [
+      { term: 'matrix product', meaning: 'the matrix of one transformation followed by another' },
+      { term: 'row times column', meaning: 'the dot product that produces one entry' },
+      { term: 'non-commutative', meaning: 'AB and BA are generally different' },
+    ],
+    tMax: () => 4, handles: [],
+  },
+  eigen3: {
+    id: 'eigen3', chapter: 14, title: 'Eigenvectors in 3D',
+    hint: 'A 3D rotation always has an axis: a line the matrix leaves alone.',
+    story: [
+      'In three dimensions the eigenvector picture gains a famous example. Every rotation has an axis, and that axis is an eigenvector with eigenvalue one: it is the only line that does not move.',
+      'A 3 by 3 matrix has a cubic characteristic polynomial, which always has at least one real root, so there is always at least one real eigen-direction. The other two may be real or a complex pair, as in 2D.',
+      'Drag the probe v. Its image Av thickens when the two line up. The dashed lines are the eigen-directions found numerically.',
+    ],
+    tryThis: [
+      'Load the Rotate z preset. The axis is k̂, eigenvalue one.',
+      'Load Stretch. Three perpendicular eigen-directions, three different stretches.',
+      'Set a column to zero and see an eigenvalue of zero appear.',
+    ],
+    terms: [
+      { term: 'axis of rotation', meaning: 'the eigenvector with eigenvalue 1 of a rotation matrix' },
+      { term: 'cubic', meaning: 'a degree 3 polynomial, always with a real root' },
+    ],
+    tMax: () => 1, handles: ['u3', 'cols3'], is3d: true,
+  },
+  pca: {
+    id: 'pca', title: 'Data and principal components',
+    hint: 'Click to add points. The ellipse is their covariance; its long axis is the first principal component.',
+    story: [
+      'Measure two things about many objects and plot them. The cloud leans in some direction. The covariance matrix records how the two measurements vary together, and its eigenvectors are the axes of the cloud.',
+      'The eigenvector with the largest eigenvalue is the first principal component: the single direction that captures the most variation. Projecting every point onto it compresses two numbers to one while losing the least information.',
+      'With a hundred measurements instead of two, the same eigenvectors find the few directions that matter. That is principal component analysis, and it is linear algebra doing data science.',
+    ],
+    tryThis: [
+      'Click to add points in a diagonal streak. The first component follows the streak.',
+      'Drag a point far away and watch the ellipse tilt toward it.',
+      'Load a round cloud. The eigenvalues become nearly equal and the direction stops mattering.',
+    ],
+    terms: [
+      { term: 'covariance matrix', meaning: 'a symmetric matrix of variances and covariances' },
+      { term: 'principal component', meaning: 'an eigenvector of the covariance matrix' },
+      { term: 'variance explained', meaning: 'an eigenvalue as a share of the total' },
+    ],
+    tMax: () => 1, handles: [],
+  },
+  compress: {
+    id: 'compress', title: 'Compressing an image',
+    hint: 'A grayscale image is a matrix. Keep its biggest singular values and the picture survives.',
+    story: [
+      'A grayscale picture is a grid of numbers, so it is a matrix. Take its SVD and write it as a sum of rank-one layers, each weighted by a singular value. The first layers carry the broad light and dark; later ones carry fine detail.',
+      'Slide the rank. With a handful of layers the image is recognisable although you kept only a fraction of the numbers. The bars show the singular values dropping off, which is why it works.',
+      'Drop in your own photo to try it. It is shrunk to a small square and turned to grayscale.',
+    ],
+    tryThis: [
+      'Set the rank to 1. You see a single smooth gradient.',
+      'Find the smallest rank where you can tell what the picture is.',
+      'Compare the numbers kept with the numbers in the original.',
+    ],
+    terms: [
+      { term: 'rank-one matrix', meaning: 'an outer product u vᵀ, one column pattern times one row pattern' },
+      { term: 'low-rank approximation', meaning: 'the closest matrix of a given rank, given by the SVD' },
+    ],
+    tMax: () => 1, handles: [],
+  },
+  complex: {
+    id: 'complex', title: 'Complex numbers as matrices',
+    hint: 'Multiplying by a + bi is a rotation and a scaling. It is the matrix [a −b; b a].',
+    story: [
+      'A complex number z = a + bi can be drawn as the point (a, b). Multiplying any other number by z rotates it by the angle of z and scales it by the length of z.',
+      'Rotate-and-scale is linear, so it has a matrix. Its columns are where 1 and i land: 1 goes to (a, b) and i goes to (−b, a). Complex multiplication is this 2 by 2 matrix in disguise.',
+      'This is why rotation matrices have complex eigenvalues, and why in 3D the same job needs quaternions: four numbers, because 3D rotations have an axis as well as an angle.',
+    ],
+    tryThis: [
+      'Drag z onto the unit circle. The grid rotates without stretching.',
+      'Put z at i. Everything turns a quarter turn.',
+      'Put z at −1. A half turn, the same as scaling by −1.',
+    ],
+    terms: [
+      { term: 'complex number', meaning: 'a + bi, drawn as the point (a, b)' },
+      { term: 'modulus and argument', meaning: 'the length and angle of a complex number' },
+      { term: 'quaternion', meaning: 'the four-dimensional cousin that encodes 3D rotations' },
+    ],
+    tMax: () => 1, handles: ['probe'],
+  },
+  fourier: {
+    id: 'fourier', title: 'The Fourier basis',
+    hint: 'Sines and cosines are perpendicular functions. Any wave is a combination of them.',
+    story: [
+      'In the space of functions, sin x, sin 2x, sin 3x and so on are perpendicular: the integral of their product is zero. They are an orthonormal basis, like î and ĵ but infinite.',
+      'So to write a wave in this basis you take dot products: each coefficient is an integral of the wave times a basis function. Add up the first few terms and the partial sum approaches the wave.',
+      'This is the Fourier series. Audio, images and signals are all stored and cleaned this way: project onto the basis, keep the big coefficients, drop the rest.',
+    ],
+    tryThis: [
+      'Increase the number of terms and watch the square wave sharpen.',
+      'Switch to the triangle wave. It needs far fewer terms. Its coefficients fall off faster.',
+      'Look at the coefficients: for the square wave only odd terms are non-zero.',
+    ],
+    terms: [
+      { term: 'orthogonal functions', meaning: 'functions whose product integrates to zero' },
+      { term: 'Fourier coefficient', meaning: 'the dot product of a function with a basis function' },
+      { term: 'partial sum', meaning: 'the first N terms added together' },
+    ],
+    tMax: () => 1, handles: [],
+  },
+  hyper: {
+    id: 'hyper', title: 'Four dimensions',
+    hint: 'A 4D cube, rotated in 4D and projected down. The same rules, one more number.',
+    story: [
+      'Nothing in linear algebra stops at three. A vector in four dimensions is four numbers; a 4 by 4 matrix rotates them. We cannot see 4D directly, so we project: first from 4D to 3D with perspective, then onto the screen.',
+      'The shape is a tesseract: sixteen corners, each joined to four others. In 4D there are six planes to rotate in, not three, because every pair of axes gives one. Rotating in a plane that includes w is what makes the inner cube swap places with the outer one.',
+      'Everything you learned still applies: the rotation matrix is orthogonal, its determinant is one, and its eigenvalues are complex pairs on the unit circle.',
+    ],
+    tryThis: [
+      'Rotate in the xw plane and watch the inner cube come forward and grow.',
+      'Rotate only in xy and yz: that is an ordinary 3D rotation, nothing strange happens.',
+      'Drag the background to orbit in 3D while the 4D rotation is playing.',
+    ],
+    terms: [
+      { term: 'tesseract', meaning: 'the 4D cube, with 16 vertices and 32 edges' },
+      { term: 'plane of rotation', meaning: 'in n dimensions a rotation turns a plane, not an axis' },
+      { term: 'projection', meaning: 'dropping a dimension, here 4D to 3D to 2D' },
+    ],
+    tMax: () => 1, handles: [], is3d: true,
   },
 }
 

@@ -26,6 +26,13 @@ type State = {
   u3: Vec3
   v3: Vec3
   poly: [number, number, number, number]
+  points: Vec[]
+  image: { size: number; data: Float64Array } | null
+  rank: number
+  fourier: { terms: number; wave: 'square' | 'triangle' | 'saw' }
+  angles4: number[]
+  spin4: boolean
+  challenge: Partial<Record<Lens, number>>
 }
 
 type Actions = {
@@ -56,6 +63,17 @@ type Actions = {
   setU3: (v: Vec3) => void
   setV3: (v: Vec3) => void
   setPoly: (i: number, v: number) => void
+  resetScene: () => void
+  addPoint: (p: Vec) => void
+  setPoint: (i: number, p: Vec) => void
+  setPoints: (ps: Vec[]) => void
+  setImage: (img: { size: number; data: Float64Array } | null) => void
+  setRank: (k: number) => void
+  setFourier: (f: Partial<State['fourier']>) => void
+  setAngle4: (i: number, v: number) => void
+  setSpin4: (b: boolean) => void
+  nextChallenge: (lens: Lens) => void
+  ensurePair: () => void
   loadFromHash: () => boolean
   toHash: () => string
 }
@@ -80,16 +98,40 @@ export const useStore = create<State & Actions>()((set, get) => ({
   u3: { x: 2, y: 0.5, z: 0 },
   v3: { x: 0.5, y: 2, z: 0.8 },
   poly: [1, -1, 0.5, 0.3],
+  points: [],
+  image: null,
+  rank: 6,
+  fourier: { terms: 3, wave: 'square' },
+  angles4: [0, 0, 0, 0, 0, 0],
+  spin4: false,
+  challenge: {},
 
   tMax: () => { const s = get(); return LENSES[s.lens].tMax({ stackLength: s.stack.length, steps: s.options.steps }) },
   setLens: (lens) => {
     set((s) => ({ lens, show: LENSES[lens].needsCircle ? { ...s.show, circle: true } : s.show }))
+    if (lens === 'multiply') get().ensurePair()
     set({ t: get().tMax() })
   },
   setM3: (r, c, v) => set((s) => ({ m3: s.m3.map((row, rr) => row.map((x, cc) => (rr === r && cc === c ? v : x))) as Mat3 })),
   setM3All: (m) => set({ m3: m }),
   setU3: (v) => set({ u3: v }),
   setV3: (v) => set({ v3: v }),
+  addPoint: (p) => set((s) => ({ points: [...s.points, p] })),
+  setPoint: (i, p) => set((s) => ({ points: s.points.map((q, k) => (k === i ? p : q)) })),
+  setPoints: (ps) => set({ points: ps }),
+  setImage: (img) => set({ image: img }),
+  setRank: (k) => set({ rank: k }),
+  setFourier: (f) => set((s) => ({ fourier: { ...s.fourier, ...f } })),
+  setAngle4: (i, v) => set((s) => ({ angles4: s.angles4.map((a, k) => (k === i ? v : a)) })),
+  setSpin4: (b) => set({ spin4: b }),
+  nextChallenge: (lens) => set((s) => ({ challenge: { ...s.challenge, [lens]: (s.challenge[lens] ?? 0) + 1 } })),
+  ensurePair: () => { const s = get(); if (s.stack.length < 2) s.addMatrix({ a: 0, b: -1, c: 1, d: 0 }, 'B') },
+  resetScene: () => {
+    const s = get()
+    s.replaceStack([{ a: 1, b: 0.5, c: 0, d: 1.2 }])
+    set({ probe: { x: 2, y: 1.5 }, probe2: { x: -1, y: 2 }, objects: [], drawing: null, m3: [[1, 0.3, 0], [0, 1, 0.4], [0.2, 0, 1.2]], u3: { x: 2, y: 0.5, z: 0 }, v3: { x: 0.5, y: 2, z: 0.8 }, poly: [1, -1, 0.5, 0.3], points: [], angles4: [0, 0, 0, 0, 0, 0], rank: 6, options: { ...s.options, k: 1, nonlinear: false } })
+    set({ t: get().tMax() })
+  },
   setPoly: (i, v) => set((s) => ({ poly: s.poly.map((x, k) => (k === i ? v : x)) as State['poly'] })),
   setOption: (k, v) => { set((s) => ({ options: { ...s.options, [k]: v } })); if (k !== 'k' && k !== 'nonlinear') set({ t: get().tMax() }) },
   setT: (t) => set({ t }),

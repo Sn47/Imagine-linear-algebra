@@ -1,6 +1,10 @@
 import type { Painter } from './painter'
 import { Painter3, type Camera } from './painter3'
 import { I3, lerp3, det3, col3, cross3, len3, scale3, add3, mul3, type Mat3, type Vec3 } from '../math/mat3'
+import { eigen3 } from '../math/eig3'
+import { pca } from '../math/pca'
+import { svdn, reconstruct, sampleImage } from '../math/svdn'
+import { rotate4, project4, tesseract } from '../math/hyper'
 import type { Lens } from '../state/lenses'
 import {
   I, mul, len, fmt, compose, composeAt, lerpMat, clamp01, lerp, det, rank, subspaces, eigen, svd, svdAt,
@@ -20,6 +24,11 @@ export type SceneState = {
   u3: Vec3
   v3: Vec3
   poly: [number, number, number, number]
+  points: Vec[]
+  image: { size: number; data: Float64Array } | null
+  rank: number
+  fourier: { terms: number; wave: 'square' | 'triangle' | 'saw' }
+  angles4: number[]
 }
 
 export const product = (s: SceneState) => compose(s.stack.map((it) => it.m))
@@ -51,34 +60,31 @@ export function matrixAt(s: SceneState, t: number): Mat {
     case 'matvec':
       return A
     case 'determinant': return composeAt(s.stack.map((it) => it.m), t)
+    case 'multiply': return composeAt(s.stack.map((it) => it.m).slice(0, 2), t / 2)
+    case 'complex': return lerpMat(I, { a: s.probe.x, b: -s.probe.y, c: s.probe.y, d: s.probe.x }, clamp01(t))
     case 'cramer':
       return A
-    case 'vector':
-    case 'add':
-    case 'dot':
-    case 'duality':
-    case 'transform3':
-    case 'nonsquare':
-    case 'cross':
-    case 'spaces':
+    default:
       return I
   }
 }
 const mul2 = (P: Mat, Q: Mat): Mat => ({ a: P.a * Q.a + P.b * Q.c, b: P.a * Q.b + P.b * Q.d, c: P.c * Q.a + P.d * Q.c, d: P.c * Q.b + P.d * Q.d })
 
 /** Whether the transformed grid should be drawn for this lens. */
-const showsGrid: Record<Lens, boolean> = {
+const showsGridMap: Partial<Record<Lens, boolean>> = {
   transform: true, subspaces: true, inverse: true, lu: true, svd: true, basis: true,
   eigen: true, iterate: false, project: false, qr: false, span: false,
   vector: false, add: false, dot: false, matvec: false,
-  duality: false, determinant: true, cramer: false, transform3: false, nonsquare: false, cross: false, spaces: false,
+  duality: false, determinant: true, cramer: false, transform3: false, nonsquare: false, cross: false, spaces: false, multiply: true, complex: true,
 }
-const showsBasisArrows: Record<Lens, boolean> = {
+const showsGrid = (l: Lens) => !!showsGridMap[l]
+const showsBasisMap: Partial<Record<Lens, boolean>> = {
   transform: true, subspaces: true, inverse: true, lu: true, svd: true, basis: true,
   eigen: false, iterate: false, project: false, qr: false, span: false,
   vector: false, add: false, dot: false, matvec: false,
-  duality: false, determinant: true, cramer: false, transform3: false, nonsquare: false, cross: false, spaces: false,
+  duality: false, determinant: true, cramer: false, transform3: false, nonsquare: false, cross: false, spaces: false, multiply: true, complex: true,
 }
+const showsBasisArrows = (l: Lens) => !!showsBasisMap[l]
 
 /** A non-linear warp for contrast: curves the grid, which no matrix can do. */
 const warp = (q: Vec, t: number): Vec => ({ x: q.x + t * 0.25 * q.y * q.y * Math.sign(q.y) * 0.5, y: q.y + t * 0.6 * Math.sin(q.x) })
@@ -136,6 +142,32 @@ function draw3d(p: Painter, s: SceneState, t: number, cam: Camera) {
       p.note(tt < 0.999 ? 'lifting the plane into 3D' : r === 2 ? 'the image is a plane: rank 2' : 'the columns are parallel: the image is a line')
       break
     }
+    case 'eigen3': {
+      const M = s.m3
+      const E = eigen3(M)
+      q.cube(lerp3(I3, M, 1), 'transparent', C.gridAccent)
+      E.forEach((e) => { const far = scale3(e.vector, 6); q.line(scale3(far, -1), far, C.faint, 1, [2, 6]) })
+      const v = s.u3, Av = mul3(M, v)
+      const cr = cross3(v, Av)
+      const aligned = len3(cr) < 0.03 * len3(v) * Math.max(len3(Av), 1e-6) && len3(Av) > 1e-3
+      q.arrow(Av, C.warm, 'Av', aligned ? 3 : 2.25)
+      q.arrow(v, C.accent, 'v', aligned ? 3 : 2.25)
+      q.arrow(col3(M, 0), C.accent, undefined, 1); q.arrow(col3(M, 1), C.warm, undefined, 1); q.arrow(col3(M, 2), K3, undefined, 1)
+      if (aligned) { const l = (v.x * Av.x + v.y * Av.y + v.z * Av.z) / (len3(v) * len3(v)); q.label(`\u03bb = ${fmt(l)}`, v, C.text, { dx: 20, dy: 24 }) }
+      p.note(E.length === 3 ? 'three real eigen-directions' : 'one real eigen-direction, the other two are complex')
+      break
+    }
+    case 'hyper': {
+      const pts = tesseract.verts.map((v) => project4(rotate4(v, s.angles4)))
+      // edges, nearer ones stronger
+      for (const [a, b] of tesseract.edges) {
+        const inner = tesseract.verts[a][3] < 0 && tesseract.verts[b][3] < 0
+        q.line(pts[a], pts[b], inner ? C.warm : C.accent, 1.25)
+      }
+      pts.forEach((v) => q.dot(v, C.text, 2.5))
+      p.note('a tesseract, rotated in 4D and projected to 3D')
+      break
+    }
     case 'cross': {
       const u = s.u3, v = s.v3
       const w = cross3(u, v)
@@ -182,9 +214,128 @@ function drawSpaces(p: Painter, s: SceneState, t: number) {
   p.label(`slope ${fmt(m)}`, { x: x0, y: y0 }, C.muted, { dx: 14, dy: 16 }, 'left')
 }
 
+function drawPca(p: Painter, s: SceneState, t: number) {
+  const C = p.C
+  p.clear(); p.grid(I, C.grid, 1); p.axes(); p.ticks()
+  const R = pca(s.points)
+  if (R) {
+    const [l1, l2] = R.values
+    const [e1, e2] = R.vectors
+    const k = 2 * clamp01(t) // 2 standard deviations
+    // covariance ellipse
+    p.ctx.beginPath()
+    for (let i = 0; i <= 90; i++) {
+      const th = (i / 90) * Math.PI * 2
+      const a = Math.sqrt(Math.max(l1, 0)) * k * Math.cos(th), b = Math.sqrt(Math.max(l2, 0)) * k * Math.sin(th)
+      const x = R.mean.x + a * e1.x + b * e2.x, y = R.mean.y + a * e1.y + b * e2.y
+      if (i === 0) p.ctx.moveTo(p.sx(x), p.sy(y)); else p.ctx.lineTo(p.sx(x), p.sy(y))
+    }
+    p.ctx.fillStyle = C.soft; p.ctx.fill(); p.ctx.strokeStyle = C.accent; p.ctx.lineWidth = 1; p.ctx.stroke()
+    p.ray(e1, C.accent, 1.5, [], R.mean)
+    p.ray(e2, C.faint, 1, [4, 4], R.mean)
+    const a1 = add(R.mean, scale(e1, Math.sqrt(Math.max(l1, 0)) * k)), a2 = add(R.mean, scale(e2, Math.sqrt(Math.max(l2, 0)) * k))
+    p.arrow(a1, C.accent, 'PC1', 2.5, R.mean)
+    p.arrow(a2, C.warm, 'PC2', 2, R.mean)
+    // projections onto PC1
+    for (const q of s.points) {
+      const d = { x: q.x - R.mean.x, y: q.y - R.mean.y }
+      const c = dot(d, e1)
+      const foot = add(R.mean, scale(e1, c))
+      p.line(q, foot, C.faint, 1, [2, 3])
+      p.dot(foot, C.accent, 2)
+    }
+    p.dot(R.mean, C.text, 4)
+  }
+  s.points.forEach((q) => p.dot(q, C.text, 3.5))
+  if (!s.points.length) p.note('click anywhere to add data points, or load a cloud from the panel')
+}
+
+let imgCache: { key: string; U: Float64Array; sv: Float64Array; V: Float64Array; data: Float64Array } | null = null
+export function imageSvd(img: { size: number; data: Float64Array }) {
+  const key = `${img.size}:${img.data[0]}:${img.data[img.data.length - 1]}:${img.data.length}`
+  if (!imgCache || imgCache.key !== key || imgCache.data !== img.data) {
+    const { U, s, V } = svdn(img.data, img.size, img.size)
+    imgCache = { key, U, sv: s, V, data: img.data }
+  }
+  return imgCache
+}
+export const defaultImage = { size: 64, data: sampleImage(64) }
+
+function drawCompress(p: Painter, s: SceneState) {
+  const C = p.C
+  p.clear()
+  const img = s.image ?? defaultImage
+  const { U, sv, V } = imageSvd(img)
+  const k = Math.max(1, Math.min(img.size, s.rank))
+  const rec = reconstruct(U, sv, V, img.size, img.size, k)
+  const side = Math.min(p.g.W * 0.4, p.g.H * 0.62)
+  const gap = Math.min(40, p.g.W * 0.04)
+  const x0 = p.g.W / 2 - side - gap / 2, y0 = (p.g.H - side) / 2 - 30
+  const paint = (data: Float64Array, x: number, y: number) => {
+    const n = img.size, cell = side / n
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+      const v = Math.max(0, Math.min(1, data[i * n + j]))
+      const g = Math.round(v * 255)
+      p.ctx.fillStyle = `rgb(${g},${g},${g})`
+      p.ctx.fillRect(x + j * cell, y + i * cell, cell + 0.6, cell + 0.6)
+    }
+    p.ctx.strokeStyle = C.faint; p.ctx.lineWidth = 1; p.ctx.strokeRect(x, y, side, side)
+  }
+  paint(img.data, x0, y0)
+  paint(rec, x0 + side + gap, y0)
+  p.ctx.font = `500 13px ${getComputedStyle(document.body).getPropertyValue('--mono')}`
+  p.ctx.fillStyle = C.muted; p.ctx.textAlign = 'center'; p.ctx.textBaseline = 'top'
+  p.ctx.fillText(`original: ${img.size} \u00d7 ${img.size} = ${img.size * img.size} numbers`, x0 + side / 2, y0 + side + 10)
+  const kept = k * (2 * img.size + 1)
+  p.ctx.fillText(`rank ${k}: ${kept} numbers (${Math.round((100 * kept) / (img.size * img.size))}%)`, x0 + side + gap + side / 2, y0 + side + 10)
+  // singular value bars
+  const bx = x0, by = y0 + side + 44, bw = 2 * side + gap, bh = Math.min(70, p.g.H - by - 16)
+  const n = Math.min(img.size, 48)
+  const max = sv[0] || 1
+  for (let i = 0; i < n; i++) {
+    const h = (sv[i] / max) * bh
+    p.ctx.fillStyle = i < k ? C.accent : C.grid
+    p.ctx.fillRect(bx + (i * bw) / n, by + bh - h, bw / n - 2, h)
+  }
+}
+
+function drawFourier(p: Painter, s: SceneState, t: number) {
+  const C = p.C
+  p.clear(); p.grid(I, C.grid, 1); p.axes(); p.ticks()
+  const { terms, wave } = s.fourier
+  const target = (x: number) => {
+    const u = ((x % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)
+    if (wave === 'square') return u < Math.PI ? 1 : -1
+    if (wave === 'saw') return 1 - u / Math.PI
+    return u < Math.PI ? 1 - (2 * u) / Math.PI : -1 + (2 * (u - Math.PI)) / Math.PI // triangle
+  }
+  const coef = (n: number) => {
+    if (wave === 'square') return n % 2 ? 4 / (Math.PI * n) : 0
+    if (wave === 'saw') return 2 / (Math.PI * n)
+    return n % 2 ? 8 / (Math.PI * Math.PI * n * n) : 0
+  }
+  const basis = (n: number, x: number) => (wave === 'triangle' ? Math.cos(n * x) : Math.sin(n * x))
+  const N = Math.max(1, Math.round(terms * clamp01(t)) || 1)
+  const partial = (x: number) => { let v = 0; for (let n = 1; n <= N; n++) v += coef(n) * basis(n, x); return v }
+  const b = p.bounds()
+  const plot = (g: (x: number) => number, color: string, width: number, dash: number[] = []) => {
+    p.ctx.beginPath()
+    const K = 600
+    for (let k = 0; k <= K; k++) { const x = b.xmin + ((b.xmax - b.xmin) * k) / K; const y = g(x); if (k === 0) p.ctx.moveTo(p.sx(x), p.sy(y)); else p.ctx.lineTo(p.sx(x), p.sy(y)) }
+    p.ctx.strokeStyle = color; p.ctx.lineWidth = width; p.ctx.setLineDash(dash); p.ctx.stroke(); p.ctx.setLineDash([])
+  }
+  plot(target, C.faint, 1.5, [4, 4])
+  for (let n = 1; n <= N; n++) if (coef(n)) plot((x) => coef(n) * basis(n, x), C.gridAccent, 1)
+  plot(partial, C.accent, 2.25)
+  p.note(`${N} term${N > 1 ? 's' : ''}: ${Array.from({ length: N }, (_, i) => i + 1).filter((n) => coef(n)).map((n) => `${fmt(coef(n))}\u00b7${wave === 'triangle' ? 'cos' : 'sin'}(${n}x)`).join(' + ') || '0'}`)
+}
+
 export function draw(p: Painter, s: SceneState, t: number, cam: Camera) {
-  if (s.lens === 'transform3' || s.lens === 'nonsquare' || s.lens === 'cross') return draw3d(p, s, t, cam)
+  if (s.lens === 'transform3' || s.lens === 'nonsquare' || s.lens === 'cross' || s.lens === 'eigen3' || s.lens === 'hyper') return draw3d(p, s, t, cam)
   if (s.lens === 'spaces') return drawSpaces(p, s, t)
+  if (s.lens === 'pca') return drawPca(p, s, t)
+  if (s.lens === 'compress') return drawCompress(p, s)
+  if (s.lens === 'fourier') return drawFourier(p, s, t)
   const C = p.C
   const A = product(s)
   const M = matrixAt(s, t)
@@ -201,9 +352,9 @@ export function draw(p: Painter, s: SceneState, t: number, cam: Camera) {
   }
 
   // Shared layers: transformed grid, unit square and circle, user objects.
-  if (s.show.grid && showsGrid[s.lens]) p.grid(M, C.gridAccent, 1)
+  if (s.show.grid && showsGrid(s.lens)) p.grid(M, C.gridAccent, 1)
   if (s.show.circle) { p.circle(I, C.axis, 1); p.circle(M, s.lens === 'svd' ? C.text : C.accent, s.lens === 'svd' ? 1.5 : 1, s.lens === 'svd' ? [] : [4, 4]) }
-  if (s.show.square && showsGrid[s.lens]) p.polygon([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }], M, C.soft, 'transparent')
+  if (s.show.square && showsGrid(s.lens)) p.polygon([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }], M, C.soft, 'transparent')
 
   for (const o of s.objects) if (o.kind === 'shape') {
     p.polygon(o.points, I, 'transparent', C.faint)
@@ -215,6 +366,29 @@ export function draw(p: Painter, s: SceneState, t: number, cam: Camera) {
   }
 
   switch (s.lens) {
+    case 'multiply': {
+      const [Am, Bm] = s.stack.map((it) => it.m)
+      if (!Bm) break
+      const cell = Math.min(3, Math.floor(t)) // 0..3 reading order
+      const j = cell % 2 // column of A
+      const colA = j === 0 ? col1(Am) : col2(Am)
+      const tt = clamp01(t / 2) // grid progress is shared
+      const stage2 = clamp01(t / 2 - 0.5) * 2
+      const carried = mul(lerpMat(I, Bm, clamp01((t - 2) / 2)), colA)
+      p.arrow(colA, C.faint, j === 0 ? 'A\u00ee' : 'A\u0135', 1.5)
+      p.arrow(carried, j === 0 ? C.accent : C.warm, `B(A${j === 0 ? '\u00ee' : '\u0135'})`, 2.5)
+      if (stage2 > 0) { const q = mul(Bm, colA); p.line({ x: q.x, y: 0 }, q, C.faint, 1, [3, 3]); p.line({ x: 0, y: q.y }, q, C.faint, 1, [3, 3]) }
+      p.note(tt < 0.5 ? 'first A acts' : 'then B acts on the columns of A')
+      break
+    }
+    case 'complex': {
+      const z = s.probe
+      p.circle(I, C.axis, 1)
+      p.dot(z, C.text, 4)
+      p.label(`z = ${fmt(z.x)} ${z.y < 0 ? '\u2212' : '+'} ${fmt(Math.abs(z.y))}i`, z, C.text, { dx: 0, dy: -18 })
+      p.label(`|z| = ${fmt(len(z))}, angle ${fmt((Math.atan2(z.y, z.x) * 180) / Math.PI, 0)}\u00b0`, z, C.muted, { dx: 0, dy: 20 })
+      break
+    }
     case 'duality': {
       const u = s.probe2, v = s.probe
       const L = len(u)
@@ -481,11 +655,11 @@ export function draw(p: Painter, s: SceneState, t: number, cam: Camera) {
       break
   }
 
-  if (showsBasisArrows[s.lens]) { p.arrow(e1, C.accent, '\u00ee'); p.arrow(e2, C.warm, '\u0135') }
+  if (showsBasisArrows(s.lens)) { p.arrow(e1, C.accent, '\u00ee'); p.arrow(e2, C.warm, '\u0135') }
 
   // User vectors: on lenses that transform the plane, show the original faintly and the image strongly.
   for (const o of s.objects) if (o.kind === 'vector' && s.lens !== 'span') {
-    if (showsGrid[s.lens]) { p.arrow(o.v, C.faint, undefined, 1.5); p.arrow(mul(M, o.v), C.text, o.name, 2.25) }
+    if (showsGrid(s.lens)) { p.arrow(o.v, C.faint, undefined, 1.5); p.arrow(mul(M, o.v), C.text, o.name, 2.25) }
     else p.arrow(o.v, C.muted, o.name, 1.75)
   }
 }

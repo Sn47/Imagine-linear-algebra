@@ -3,6 +3,11 @@ import { useStore, PRESETS, type StackItem } from '../state/store'
 import { LENSES, LENS_ORDER } from '../state/lenses'
 import { compose, det, trace, eigen, svd, rot, diag, fmt, rank, inverse, lu, qr, project, solve, col1, col2, cross, len, fromCols, dot, mul, scale, mmul, type Mat } from '../math/mat2'
 import { det3, cross3, len3, col3, rank3, type Vec3 } from '../math/mat3'
+import { eigen3 } from '../math/eig3'
+import { pca, randomCloud } from '../math/pca'
+import { PLANES } from '../math/hyper'
+import { CHALLENGES } from '../state/challenges'
+import { imageSvd, defaultImage } from '../scene/lenses'
 
 /** Number input that keeps what you type until it parses, and follows outside changes (drags) when not focused. */
 function NumberField({ value, onChange, className, label }: { value: number; onChange: (n: number) => void; className: string; label: string }) {
@@ -49,6 +54,52 @@ function Matrix3Editor({ cols = 3, rows = 3 }: { cols?: number; rows?: number })
       )))}
     </div>
   )
+}
+
+function MultiplyView() {
+  const s = useStore()
+  const [Am, Bm] = s.stack.map((it) => it.m)
+  const cell = Math.min(3, Math.floor(s.t))
+  const r = Math.floor(cell / 2), c = cell % 2
+  const B = [[Bm.a, Bm.b], [Bm.c, Bm.d]], A2 = [[Am.a, Am.b], [Am.c, Am.d]]
+  const P = [[0, 0], [0, 0]]
+  for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) P[i][j] = B[i][0] * A2[0][j] + B[i][1] * A2[1][j]
+  const grid = (M: number[][], hl: (i: number, j: number) => boolean, name: string) => (
+    <div className="factor on"><div className="name">{name}</div>
+      <div className="mini">{M.flatMap((row, i) => row.map((v, j) => <span key={`${i}${j}`} className={hl(i, j) ? 'hl' : ''}>{fmt(v)}</span>))}</div>
+    </div>
+  )
+  const reached = (i: number, j: number) => i * 2 + j < cell || (i * 2 + j === cell && s.t >= 3.999)
+  return (
+    <div>
+      <div className="factors">
+        {grid(B, (i) => i === r, 'B')}
+        {grid(A2, (_, j) => j === c, 'A')}
+        {grid(P, (i, j) => i === r && j === c, 'BA')}
+      </div>
+      <p className="story muted" style={{ marginTop: 10 }}>
+        row {r + 1} of B · column {c + 1} of A = {fmt(B[r][0])}·{fmt(A2[0][c])} + {fmt(B[r][1])}·{fmt(A2[1][c])} = {fmt(P[r][c])}
+        {reached(r, c) ? '' : ''}
+      </p>
+    </div>
+  )
+}
+
+async function loadImage(file: File | undefined, set: (img: { size: number; data: Float64Array } | null) => void) {
+  if (!file) return
+  const url = URL.createObjectURL(file)
+  const img = new Image()
+  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url })
+  const size = 64
+  const cv = document.createElement('canvas'); cv.width = size; cv.height = size
+  const ctx = cv.getContext('2d')!
+  const side = Math.min(img.width, img.height)
+  ctx.drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, size, size)
+  const px = ctx.getImageData(0, 0, size, size).data
+  const data = new Float64Array(size * size)
+  for (let i = 0; i < size * size; i++) data[i] = (0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2]) / 255
+  URL.revokeObjectURL(url)
+  set({ size, data })
 }
 
 function MatrixEditor({ item, index }: { item: StackItem; index: number }) {
@@ -99,7 +150,7 @@ export default function Panel({ onPlay }: { onPlay: () => void }) {
     ['Determinant', fmt(d), d < -1e-9 ? 'orientation flipped' : Math.abs(d) < 1e-9 ? 'collapses a dimension' : undefined],
     ['Trace', fmt(trace(M))],
   ]
-  const vectorLens = s.lens === 'vector' || s.lens === 'add' || s.lens === 'dot' || s.lens === 'duality' || s.lens === 'spaces' || !!LENSES[s.lens].is3d
+  const vectorLens = s.lens === 'vector' || s.lens === 'add' || s.lens === 'dot' || s.lens === 'duality' || s.lens === 'spaces' || s.lens === 'pca' || s.lens === 'compress' || s.lens === 'complex' || s.lens === 'fourier' || !!LENSES[s.lens].is3d
   if (vectorLens) rows.length = 0
   if (s.lens === 'vector') {
     const v = s.probe
@@ -170,6 +221,45 @@ export default function Panel({ onPlay }: { onPlay: () => void }) {
     const [a, b, c, dd] = s.poly
     rows.push(['f as a vector', `(${fmt(a, 1)}, ${fmt(b, 1)}, ${fmt(c, 1)}, ${fmt(dd, 1)})`, 'basis 1, x, x², x³'], ['f′ as a vector', `(${fmt(b, 1)}, ${fmt(2 * c, 1)}, ${fmt(3 * dd, 1)}, 0)`, 'the matrix times the vector above'])
   }
+  if (s.lens === 'multiply') {
+    const [Am, Bm] = s.stack.map((it) => it.m)
+    if (Bm) {
+      rows.length = 0
+      const P = mmul(Bm, Am), Q = mmul(Am, Bm)
+      rows.push(['BA (A first)', `[${fmt(P.a)} ${fmt(P.b)}; ${fmt(P.c)} ${fmt(P.d)}]`], ['AB (B first)', `[${fmt(Q.a)} ${fmt(Q.b)}; ${fmt(Q.c)} ${fmt(Q.d)}]`, Math.hypot(P.a - Q.a, P.b - Q.b, P.c - Q.c, P.d - Q.d) < 1e-6 ? 'the same here' : 'different: order matters'])
+    }
+  }
+  if (s.lens === 'eigen3') {
+    rows.length = 0
+    const E = eigen3(s.m3)
+    E.forEach((e, i) => rows.push([`λ${'₁₂₃'[i]}`, fmt(e.value), `direction (${fmt(e.vector.x, 1)}, ${fmt(e.vector.y, 1)}, ${fmt(e.vector.z, 1)})`]))
+    if (E.length < 3) rows.push(['Other two', 'complex pair', 'a rotation hides in there'])
+  }
+  if (s.lens === 'pca') {
+    rows.length = 0
+    const R = pca(s.points)
+    rows.push(['Points', String(s.points.length)])
+    if (R) {
+      const tot = R.values[0] + R.values[1]
+      rows.push(['Covariance', `[${fmt(R.cov.a)} ${fmt(R.cov.b)}; ${fmt(R.cov.c)} ${fmt(R.cov.d)}]`], ['PC1 explains', `${Math.round((100 * R.values[0]) / tot)}%`, `eigenvalue ${fmt(R.values[0])}`], ['PC2 explains', `${Math.round((100 * R.values[1]) / tot)}%`, `eigenvalue ${fmt(R.values[1])}`])
+    }
+  }
+  if (s.lens === 'compress') {
+    rows.length = 0
+    const img = s.image ?? defaultImage
+    const { sv } = imageSvd(img)
+    const k = Math.min(img.size, s.rank)
+    const energy = sv.reduce((a, v) => a + v * v, 0)
+    let kept = 0; for (let i = 0; i < k; i++) kept += sv[i] * sv[i]
+    rows.push(['Rank', String(k), `of ${img.size}`], ['Energy kept', `${(100 * kept / energy).toFixed(1)}%`, 'sum of σ² kept'], ['σ₁, σ₂, σ₃', `${fmt(sv[0], 1)}, ${fmt(sv[1], 1)}, ${fmt(sv[2], 1)}`])
+  }
+  if (s.lens === 'complex') {
+    rows.length = 0
+    const z = s.probe
+    rows.push(['z', `${fmt(z.x)} ${z.y < 0 ? '−' : '+'} ${fmt(Math.abs(z.y))}i`], ['Matrix', `[${fmt(z.x)} ${fmt(-z.y)}; ${fmt(z.y)} ${fmt(z.x)}]`, 'columns: where 1 and i land'], ['|z|', fmt(len(z)), 'the scale'], ['angle', `${fmt((Math.atan2(z.y, z.x) * 180) / Math.PI, 1)}°`, 'the rotation'])
+  }
+  if (s.lens === 'fourier') { rows.length = 0 }
+  if (s.lens === 'hyper') { rows.length = 0; rows.push(['Vertices', '16'], ['Edges', '32'], ['Rotation planes', '6', 'one per pair of axes']) }
   if (s.lens === 'subspaces') rows.push(['Rank', String(rank(M))], ['Nullity', String(2 - rank(M))])
   if (s.lens === 'eigen' || s.lens === 'iterate' || s.lens === 'transform') {
     if (E.real) rows.push(['λ₁', fmt(E.values[0])], ['λ₂', fmt(E.values[1]), E.repeated ? 'repeated' : undefined])
@@ -202,11 +292,12 @@ export default function Panel({ onPlay }: { onPlay: () => void }) {
   const luStage = s.t < 1 ? 0 : s.t < 2 ? 1 : 2
   const qrStage = s.t < 1 ? 0 : s.t < 2 ? 1 : 2
   return (
-    <aside ref={asideRef}>
+    <aside ref={asideRef} key={s.lens} className="enter">
       <div>
         <h1>{LENSES[s.lens].title}</h1>
         <p className="hint">{LENSES[s.lens].hint}</p>
         {LENSES[s.lens].chapter && <p className="chapter">Essence of linear algebra, chapter {LENSES[s.lens].chapter}</p>}
+        <button className="link reset" onClick={() => { s.resetScene(); onPlay() }}>Reset this scene</button>
       </div>
 
 
@@ -245,6 +336,63 @@ export default function Panel({ onPlay }: { onPlay: () => void }) {
           ))}
           <p className="label">The derivative as a matrix</p>
           <div className="matrix three c4 fixed"><span>0</span><span>1</span><span>0</span><span>0</span><span>0</span><span>0</span><span>2</span><span>0</span><span>0</span><span>0</span><span>0</span><span>3</span><span>0</span><span>0</span><span>0</span><span>0</span></div>
+        </section>
+      )}
+      {s.lens === 'multiply' && s.stack.length >= 2 && (
+        <section>
+          <p className="label">BA, one cell at a time</p>
+          <MultiplyView />
+        </section>
+      )}
+      {s.lens === 'eigen3' && (
+        <section>
+          <p className="label">Matrix, drag the column tips in the view</p>
+          <Matrix3Editor />
+          <div className="chips">
+            {[['Identity', [[1,0,0],[0,1,0],[0,0,1]]], ['Rotate z', [[0.707,-0.707,0],[0.707,0.707,0],[0,0,1]]], ['Stretch', [[1.5,0,0],[0,0.7,0],[0,0,1.2]]], ['Tilted rotation', [[0.8,-0.36,0.48],[0.6,0.48,-0.64],[0,0.8,0.6]]]].map(([n, m]) => (
+              <button key={n as string} onClick={() => { s.setM3All(m as never); onPlay() }}>{n as string}</button>
+            ))}
+          </div>
+        </section>
+      )}
+      {s.lens === 'pca' && (
+        <section>
+          <p className="label">Data</p>
+          <div className="chips">
+            <button onClick={() => { s.setPoints(randomCloud(40, 0.6, 1.6, 0.5, { x: 0.5, y: 0.3 })); onPlay() }}>Diagonal cloud</button>
+            <button onClick={() => { s.setPoints(randomCloud(40, -0.4, 1.2, 0.3, { x: -0.5, y: 0.8 })); onPlay() }}>Thin streak</button>
+            <button onClick={() => { s.setPoints(randomCloud(40, 0, 1, 1, { x: 0, y: 0 })); onPlay() }}>Round cloud</button>
+            <button onClick={() => s.setPoints([])}>Clear</button>
+          </div>
+          <p className="empty">Click on the canvas to add points, drag to move them.</p>
+        </section>
+      )}
+      {s.lens === 'compress' && (
+        <section>
+          <p className="label">Rank k = {s.rank}</p>
+          <input className="scrub" type="range" min={1} max={(s.image ?? defaultImage).size} step={1} value={s.rank} onChange={(e) => s.setRank(parseInt(e.target.value))} aria-label="Rank" />
+          <label className="link upload">Drop in a photo<input type="file" accept="image/*" hidden onChange={(e) => loadImage(e.target.files?.[0], s.setImage)} /></label>
+          {s.image && <button className="link" onClick={() => s.setImage(null)}>Back to the sample image</button>}
+        </section>
+      )}
+      {s.lens === 'fourier' && (
+        <section>
+          <p className="label">Wave</p>
+          <div className="chips toggles">
+            {(['square', 'triangle', 'saw'] as const).map((w) => <button key={w} aria-pressed={s.fourier.wave === w} onClick={() => { s.setFourier({ wave: w }); onPlay() }}>{w}</button>)}
+          </div>
+          <p className="label">Terms: {s.fourier.terms}</p>
+          <input className="scrub" type="range" min={1} max={25} step={1} value={s.fourier.terms} onChange={(e) => s.setFourier({ terms: parseInt(e.target.value) })} aria-label="Number of terms" />
+        </section>
+      )}
+      {s.lens === 'hyper' && (
+        <section>
+          <div className="section-head"><p className="label">Rotation in each plane</p><button className="link" onClick={() => s.setSpin4(!s.spin4)}>{s.spin4 ? 'Stop' : 'Spin'}</button></div>
+          {PLANES.map(([, , name], i) => (
+            <label key={name} className="coef"><span className="mono">{name} {fmt((s.angles4[i] * 180) / Math.PI, 0)}°</span>
+              <input className="scrub" type="range" min={-Math.PI} max={Math.PI} step={0.01} value={((s.angles4[i] + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI} onChange={(e) => s.setAngle4(i, parseFloat(e.target.value))} aria-label={`rotation in ${name}`} />
+            </label>
+          ))}
         </section>
       )}
       {s.lens === 'transform' && (
@@ -366,6 +514,23 @@ export default function Panel({ onPlay }: { onPlay: () => void }) {
           <button aria-pressed={s.show.circle} onClick={() => s.toggle('circle')}>Unit circle</button>
         </div>
       </details>
+      {(CHALLENGES[s.lens]?.length ?? 0) > 0 && (() => {
+        const list = CHALLENGES[s.lens]!
+        const i = Math.min(s.challenge[s.lens] ?? 0, list.length)
+        const done = i >= list.length
+        const ok = !done && list[i].check(s)
+        return (
+          <details className="fold" open>
+            <summary>Challenge {done ? '' : `${i + 1} of ${list.length}`}</summary>
+            {done ? <p className="story muted">All done here. Try the next lens.</p> : (
+              <div className={`challenge${ok ? ' ok' : ''}`}>
+                <p className="story">{list[i].text}</p>
+                {ok ? <button className="link" onClick={() => s.nextChallenge(s.lens)}>Solved. Next challenge →</button> : <span className="muted">not yet</span>}
+              </div>
+            )}
+          </details>
+        )
+      })()}
       <details className="fold">
         <summary>What is going on</summary>
         {LENSES[s.lens].story.map((para, i) => <p key={i} className="story">{para}</p>)}
